@@ -1,0 +1,11 @@
+Inferred image_size/storage_base: 0x0002c000
+Inferred user/config start:       0x00058000
+
+FOUND candidate_model_WCU_MY32 at 0x000513a5
+000513a5  57 43 55 5f 4d 59 33 32 5f 30 30 30 30 0c ff 00   WCU_MY32_0000...
+
+FOUND corrupt_model_from_A1 at 0x0007b006
+0007b006  22 f9 81 60 bb e0 96 53 5f 38 44 44 38 0c ff 00   "..`...S_8DD8...
+
+FOUND name_suffix__8DD8 at 0x0007b00e
+0007b00e  5f 38 44 44 38 0c ff 00 00 00 00 30 d8 8d 01 16   _8DD8......0....

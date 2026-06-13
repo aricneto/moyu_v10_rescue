@@ -1,0 +1,32 @@
+Scanning for target cube by MAC/name...
+CF:30:16:01:8D:D8 | dev.name='"��`��S_8DD8' | local_name='"��`��S_8DD8' | rssi=-45 | uuids=[]
+
+Manufacturer data:
+  company 0x0000: 00 00 30 d8 8d 01 16 30 cf
+
+Trying manual MAC CF:30:16:01:8D:D8; salt = reversed bytes
+  salt: d8:8d:01:16:30:cf
+notify raw: 4d ab 5c 00 67 62 2b 14 11 f9 03 5f 3f fe ee 5c 6c 17 ce 52
+  decrypted: a1 22 f9 81 60 bb e0 96 53 02 01 02 0b 63 e2 80 00 00 00 00
+  type: 0xa1 cube info
+
+Requesting battery A4...
+notify raw: da 2d ee b8 08 f2 a2 91 4f 6a 9e 8f bd d7 2e 79 d7 f5 5f 37
+  battery raw dec: a4 44 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  battery: 68 %
+
+EVENT
+  raw:       0a cc dc 54 79 f7 01 b0 54 60 94 b6 97 6a de 00 71 c8 73 19
+  decrypted: a5 01 29 00 8e 00 8c 00 64 00 62 00 01 42 50 40 00 00 00 00
+  type:      0xa5 move
+  MOVE A5
+    serial:        0
+    raw codes:     [0, 5, 1, 5, 0]
+    guessed moves: ['F', "U'", "F'", "U'", 'F']
+    times BE:      [297, 142, 140, 100, 98]
+    times LE:      [10497, 36352, 35840, 25600, 25088]
+
+AC RE-ENABLE RESPONSE
+  raw:       a3 73 7f 3c 9b a9 0c 23 b0 be c6 85 9f 54 fd 24 54 c4 51 4c
+  decrypted: ac 01 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  type:      0xac gyro config
