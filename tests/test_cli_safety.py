@@ -148,6 +148,129 @@ def test_action_apply_erases_only_when_dirty_model_is_present_and_confirmed(monk
     assert ota.stopped
 
 
+class RWFakeOTA:
+    """Stateful sector fake: erase blanks it, writes land in it, reads see both."""
+
+    def __init__(self, sector_bytes: bytes, base: int = 0x7B000, write_ok: bool = True):
+        self.mem = bytearray(sector_bytes)
+        self.base = base
+        self.write_ok = write_ok
+        self.erased = False
+        self.stopped = False
+        self.writes = []
+
+    async def stop(self):
+        self.stopped = True
+
+    async def read_flash(self, addr, length):
+        off = addr - self.base
+        return bytes(self.mem[off:off + length])
+
+    async def page_erase(self, sector):
+        self.erased = True
+        self.erased_sector = sector
+        self.mem = bytearray(b"\xFF" * len(self.mem))
+
+    async def write_flash(self, addr, data, chunk=None):
+        if not self.write_ok:
+            raise TimeoutError("No OTA notification for opcode 0x05")
+        self.writes.append((addr, bytes(data)))
+        off = addr - self.base
+        self.mem[off:off + len(data)] = data
+
+    async def write_data(self, addr, data, timeout=6.0):
+        await self.write_flash(addr, data)
+        return b""
+
+
+# Real bytes from cube CF:30:16:02:13:22 — model corrupted to 5 bytes, AD length 0x0b.
+CORRUPT_1322_HEAD = bytes.fromhex(
+    "25 12 23 cb 0b 09 e5 a7 01 8b 01 5f 31 33 32 32"
+    "0c ff 00 00 00 00 30 22 13 02 16 30 cf"
+)
+A1_1322 = bytes.fromhex("e5 a7 01 8b 01 00 00 00")
+
+
+def sector_1322() -> bytes:
+    return CORRUPT_1322_HEAD + b"\xFF" * (SECTOR_SIZE - len(CORRUPT_1322_HEAD))
+
+
+def test_action_repair_write_rewrites_the_record_and_verifies(monkeypatch):
+    cfg = ToolConfig(color=False, target_name_suffix="1322")
+    ota = RWFakeOTA(sector_1322())
+    install_common_apply_mocks(monkeypatch, A1_1322, ota, sector_choice=0x7B000, prompt=True)
+
+    run(cli.action_repair_write(cfg))
+
+    assert ota.erased and ota.erased_sector == 0x7B000
+    assert b"WCU_MY32_1322" in bytes(ota.mem)
+    assert ota.mem[0x004] == 0x0E  # AD length corrected for the longer name
+    # The manufacturer record carries the MAC the AES salt comes from; losing it
+    # would be worse than the corruption being repaired.
+    assert bytes.fromhex("0c ff 00 00 00 00 30 22 13 02 16 30 cf") in bytes(ota.mem)
+
+
+def test_action_repair_write_refuses_when_the_record_structure_is_unknown(monkeypatch):
+    # Model bytes present, but not behind an AD complete-local-name header.
+    cfg = ToolConfig(color=False, target_name_suffix="1322")
+    stray = bytearray(b"\xFF" * SECTOR_SIZE)
+    stray[0x100:0x105] = bytes.fromhex("e5 a7 01 8b 01")
+    ota = RWFakeOTA(bytes(stray))
+    install_common_apply_mocks(monkeypatch, A1_1322, ota, sector_choice=0x7B000, prompt=True)
+
+    run(cli.action_repair_write(cfg))
+
+    assert not ota.erased
+    assert ota.writes == []
+
+
+def test_action_repair_write_refuses_when_the_sector_cannot_be_located(monkeypatch):
+    cfg = ToolConfig(color=False, target_name_suffix="1322")
+    ota = RWFakeOTA(sector_1322())
+    install_common_apply_mocks(monkeypatch, A1_1322, ota, sector_choice=None, prompt=True)
+
+    run(cli.action_repair_write(cfg))
+
+    assert not ota.erased
+
+
+def test_action_repair_write_aborts_on_a_wrong_confirmation_phrase(monkeypatch):
+    cfg = ToolConfig(color=False, target_name_suffix="1322")
+    ota = RWFakeOTA(sector_1322())
+    install_common_apply_mocks(monkeypatch, A1_1322, ota, sector_choice=0x7B000, prompt=False)
+
+    run(cli.action_repair_write(cfg))
+
+    assert not ota.erased
+    assert ota.writes == []
+
+
+def test_action_repair_write_leaves_the_sector_erased_when_the_write_fails(monkeypatch):
+    # The degraded outcome must be exactly the erase-only state, which the saved
+    # backup can be restored over — not a half-written record.
+    cfg = ToolConfig(color=False, target_name_suffix="1322")
+    ota = RWFakeOTA(sector_1322(), write_ok=False)
+    install_common_apply_mocks(monkeypatch, A1_1322, ota, sector_choice=0x7B000, prompt=True)
+
+    with pytest.raises(TimeoutError):
+        run(cli.action_repair_write(cfg))
+
+    assert ota.erased
+    assert all(b == 0xFF for b in ota.mem)
+
+
+def test_action_write_test_refuses_when_the_probe_area_is_not_blank(monkeypatch):
+    cfg = ToolConfig(color=False, target_name_suffix="1322")
+    dirty = bytearray(b"\xFF" * SECTOR_SIZE)
+    dirty[-16:] = bytes(range(16))
+    ota = RWFakeOTA(bytes(dirty))
+    install_common_apply_mocks(monkeypatch, A1_1322, ota, sector_choice=0x7B000, prompt=True)
+
+    run(cli.action_write_test(cfg))
+
+    assert ota.writes == []
+
+
 def test_action_apply_refuses_if_chosen_sector_no_longer_contains_a1_model(monkeypatch):
     cfg = ToolConfig(color=False)
     dirty_model = b"BADMODEL"

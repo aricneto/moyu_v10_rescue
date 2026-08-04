@@ -165,6 +165,50 @@ model: 57 43 55 5f 4d 59 33 32 / 'WCU_MY32'
 
 and apps such as WCU/Cubeast/csTimer should have a much better chance of recognizing the cube again.
 
+### 8. Full-flash identity scan (read-only)
+
+Options 3 and 4 scan a window around user/config space, which is where the *live*
+record is. This one sweeps the whole flash (`--scan-start` / `--scan-end` to narrow
+it) looking for pristine `WCU_MY32` bytes anywhere.
+
+That matters because the cube this tool originally recovered had a clean template
+at `0x000513a5`, below user/config space, which is the most likely thing the
+firmware regenerated the identity from after erase. A cube without one is not the
+same situation, and erase-only is a much larger bet there.
+
+The scan is slow — roughly one BLE round trip per `--read-chunk` bytes, so a full
+1 MB sweep is several minutes.
+
+### 9. WRITE_DATA capability test
+
+Writes four bytes into blank padding at the end of the identity sector and reads
+them back. Nothing live is touched, and a backup is taken first.
+
+`WRITE_DATA` (`0x05`) timed out during the original recovery, so it is not used on
+any automatic path. This is how you find out whether *this* cube accepts it, which
+decides whether option 10 is available.
+
+### 10. Rewrite identity record (erase + write)
+
+The repair to prefer when option 9 passes. Reads the sector, locates the
+advertising name record, rebuilds it with the correct model name — fixing the AD
+length byte and shifting the manufacturer-data record that follows — then erases
+the sector and writes the corrected image back.
+
+It refuses unless the model bytes are found *inside a real AD name record*
+(`0x09` type byte in front, expected suffix at the end). Corrupt bytes can be
+anything, so a bare pattern hit is not enough to justify rewriting.
+
+The important property is that it is **reversible**: the pre-image is saved first,
+and if the write fails the sector is simply left erased — the same state option 5
+produces, from which you can retry or restore.
+
+### 11. Restore identity sector from a backup
+
+Erases the sector and writes a saved `.bin` back over it. The target address comes
+from the backup's filename, not from configuration, so a restore cannot land on
+the wrong sector.
+
 ## One-shot command mode
 
 You can run menu options directly:
@@ -174,23 +218,36 @@ py .\v10_rescue.py --command scan
 py .\v10_rescue.py --command test
 py .\v10_rescue.py --command verify
 py .\v10_rescue.py --command backup
+py .\v10_rescue.py --command fullscan
+py .\v10_rescue.py --command writetest
+py .\v10_rescue.py --command repair
+py .\v10_rescue.py --command restore
 py .\v10_rescue.py --command apply
 py .\v10_rescue.py --command reboot
 ```
 
 ## Suggested repair flow
 
-Use this order:
+Gather evidence first, then pick a repair based on what it says:
 
 ```text
 1. scan
 2. test
-3. verify
+3. verify          -> is the live record located?
 4. backup
-5. apply
-6. reboot
-7. test again
+5. fullscan        -> does a pristine WCU_MY32 template exist?
+6. writetest       -> does this firmware accept WRITE_DATA?
 ```
+
+Then:
+
+| writetest | fullscan | Do this |
+|-----------|----------|---------|
+| passes    | either   | `repair` (option 10) — reversible |
+| fails     | template found | `apply` (option 5), then `reboot` — the upstream path |
+| fails     | no template    | Stop. Erasing may leave no identity to regenerate from, and the manufacturer data that seeds the AES salt lives in the same record. A cube with a corrupt *name* is still usable by software that does not filter on it; a cube with no identity record may not be. |
+
+Finish with `reboot`, then `test` again. Success is `A1` reporting `WCU_MY32`.
 
 Do not run `apply` repeatedly. If the sector is already blank, run `reboot` instead.
 
@@ -221,6 +278,17 @@ This tool's main repair path avoids `WRITE_DATA`. During the original recovery, 
 ### BLE scanner still shows the old garbled name after repair
 
 The OS or scanner may cache old names. Reboot the cube using option 6, toggle Bluetooth, remove/forget the device, scan from a second device, or run the protocol test. The reliable success check is `A1` showing `WCU_MY32`.
+
+### The corrupt model is shorter than 8 bytes
+
+`A1` always returns an 8-byte model field and zero-pads it, but flash stores only
+the real bytes followed immediately by the name suffix. When the corruption is
+shorter than 8 bytes — e.g. `e5 a7 01 8b 01` in place of `WCU_MY32`, with the AD
+length byte rewritten from `0x0e` to `0x0b` — searching flash for the padded field
+finds nothing, and every locate-based safety check refuses.
+
+The scan strips that padding before searching, which is a no-op when all eight
+bytes are real, so the full-length case behaves exactly as before.
 
 ### The verify option says A1 is corrupt but flash does not contain those bytes
 

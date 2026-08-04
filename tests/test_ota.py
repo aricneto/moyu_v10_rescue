@@ -165,6 +165,60 @@ def test_read_flash_uses_multiple_chunks():
     run(scenario())
 
 
+def test_write_data_frames_addr_then_length_then_payload():
+    # Framing mirrors READ_DATA (0x06), which is the only documented shape for
+    # this firmware. If a real cube rejects it, cmd() surfaces the raw response
+    # rather than this silently writing to the wrong place.
+    def responder(pkt):
+        assert pkt == bytes.fromhex("05 09 00 00 b0 07 00 03 00 aa bb cc")
+        opcode = pkt[0]
+        addr, length = struct.unpack("<IH", pkt[3:9])
+        return ota_response(0, opcode, struct.pack("<IH", addr, length))
+
+    async def scenario():
+        client = FakeClient(responder)
+        ota = FreqchipOTA(client, ToolConfig(color=False))
+        await ota.start()
+        await ota.write_data(0x0007B000, bytes.fromhex("aa bb cc"))
+
+    run(scenario())
+
+
+def test_write_data_rejects_an_echo_that_disagrees():
+    def responder(pkt):
+        opcode = pkt[0]
+        # Echo a different address than the one requested.
+        return ota_response(0, opcode, struct.pack("<IH", 0xDEAD, 3))
+
+    async def scenario():
+        client = FakeClient(responder)
+        ota = FreqchipOTA(client, ToolConfig(color=False))
+        await ota.start()
+        with pytest.raises(RuntimeError, match="echoed"):
+            await ota.write_data(0x0007B000, b"abc")
+
+    run(scenario())
+
+
+def test_write_flash_splits_into_write_chunks():
+    written = {}
+
+    def responder(pkt):
+        opcode = pkt[0]
+        addr, length = struct.unpack("<IH", pkt[3:9])
+        written[addr] = pkt[9:9 + length]
+        return ota_response(0, opcode, struct.pack("<IH", addr, length))
+
+    async def scenario():
+        client = FakeClient(responder)
+        ota = FreqchipOTA(client, ToolConfig(color=False, write_chunk=4))
+        await ota.start()
+        await ota.write_flash(0x100, bytes(range(10)))
+        assert written == {0x100: bytes(range(0, 4)), 0x104: bytes(range(4, 8)), 0x108: bytes(range(8, 10))}
+
+    run(scenario())
+
+
 def test_page_erase_requires_4k_alignment():
     async def scenario():
         client = FakeClient(lambda pkt: ota_response(0, pkt[0], struct.pack("<I", 0x0007B000)))

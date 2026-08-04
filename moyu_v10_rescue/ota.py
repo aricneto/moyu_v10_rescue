@@ -143,6 +143,37 @@ class FreqchipOTA:
             out += await self.read_data_once(addr + len(out), n)
         return bytes(out)
 
+    async def write_data(self, addr: int, data: bytes, timeout: float = 6.0):
+        """OTA WRITE_DATA (0x05). Framing mirrors READ_DATA: u32 addr, u16 len, payload.
+
+        The upstream recovery reported this opcode timing out, so it is not on
+        any automatic path — callers must have proven it works on this cube
+        first (see the write capability test). NOR flash only clears bits on a
+        write, so the target must be erased or blank.
+        """
+        if not (0 < len(data) <= 0xFFFF):
+            raise ValueError("data length must be 1..65535")
+
+        payload = struct.pack("<IH", addr, len(data)) + data
+        raw, rsp_payload = await self.cmd(0x05, payload, timeout=timeout)
+
+        if len(rsp_payload) >= 6:
+            echoed_addr, echoed_len = struct.unpack("<IH", rsp_payload[:6])
+            if echoed_addr != addr or echoed_len != len(data):
+                raise RuntimeError(
+                    f"WRITE_DATA echoed addr/len {echoed_addr:#x}/{echoed_len}, "
+                    f"expected {addr:#x}/{len(data)}; raw={raw.hex(' ')}"
+                )
+        return raw
+
+    async def write_flash(self, addr: int, data: bytes, chunk: int | None = None):
+        chunk = chunk or self.cfg.write_chunk
+        written = 0
+        while written < len(data):
+            n = min(chunk, len(data) - written)
+            await self.write_data(addr + written, data[written:written + n])
+            written += n
+
     async def page_erase(self, sector_addr: int):
         if sector_addr % 0x1000 != 0:
             raise ValueError("sector_addr must be 4 KB aligned")
