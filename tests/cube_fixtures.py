@@ -8,7 +8,7 @@ be designed against a sector tail that one copy was missing.
       the 8-byte model was overwritten with 8 junk bytes, so the record kept
       its original length and the A1 model bytes appeared verbatim in flash.
 
-  1322 (rescue_tool_session_output.txt, 2026-08-04, option 4 sector dump)
+  1322 (option 4 sector dump, 2026-08-04)
       the 8-byte model was replaced by 5 junk bytes and the AD length byte was
       rewritten to match, so the record is 3 bytes shorter, the A1 field --
       always 8 bytes wide -- comes back zero-padded, and the 3 bytes the record

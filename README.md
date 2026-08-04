@@ -20,6 +20,13 @@ The successful repair path was **not** a normal BLE rename. The cube did not exp
 
 This tool can erase one 4 KB flash sector when you choose the repair option. Use the read-only options first.
 
+> **Find out what broke the cube before you repair it.** The corruption is usually
+> caused by an app connecting with the wrong MAC: a wrong MAC is a wrong AES key,
+> and the cube has no authentication step, so it decrypts the write with *its* key
+> and executes the resulting 20 bytes as a command. It is deterministic — repair
+> the cube, reconnect the same app, and it breaks again identically. We watched it
+> happen. See [`docs/what-corrupts-the-identity-record.md`](docs/what-corrupts-the-identity-record.md).
+
 The main repair flow intentionally does **not** use OTA `WRITE_DATA` because this firmware timed out on `0x05 WRITE_DATA` during recovery. The proven repair path was:
 
 1. Verify the corrupt A1 model bytes.
