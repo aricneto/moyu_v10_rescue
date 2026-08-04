@@ -3,11 +3,36 @@ import pytest
 pytest.importorskip("Crypto.Cipher.AES")
 
 from moyu_v10_rescue.cube_protocol import (
+    A1Info,
     packet,
     bit_groups_msb,
     parse_a5_move,
     parse_a3_facelets,
 )
+
+# Decrypted A1 responses captured from both cubes.
+A1_1322 = bytes.fromhex("a1 e5 a7 01 8b 01 00 00 00 02 01 02 0b 60 59 40 00 00 00 00")
+A1_8DD8 = bytes.fromhex("a1 22 f9 81 60 bb e0 96 53 02 01 02 0b 63 e2 80 00 00 00 00")
+
+
+class TestA1Info:
+    def test_reads_the_model_and_versions(self):
+        info = A1Info.from_decrypted(b"", A1_1322)
+        assert info.model_bytes == bytes.fromhex("e5 a7 01 8b 01 00 00 00")
+        assert info.hw_version == (2, 1)
+        assert info.sw_version == (2, 11)
+        assert info.version_text == "hw 2.1, sw 2.11"
+
+    def test_both_cubes_run_the_same_firmware(self):
+        # WRITE_DATA is only known to time out on one firmware. These two cubes
+        # report the same one, so the 8DD8 timeout is evidence about 1322.
+        a, b = A1Info.from_decrypted(b"", A1_1322), A1Info.from_decrypted(b"", A1_8DD8)
+        assert (a.hw_version, a.sw_version) == (b.hw_version, b.sw_version)
+
+    def test_tolerates_a_short_response(self):
+        info = A1Info.from_decrypted(b"", bytes.fromhex("a1 57 43 55"))
+        assert info.hw_version is None
+        assert info.version_text == "hw unknown, sw unknown"
 
 
 def test_packet_builds_20_byte_zero_padded_message():

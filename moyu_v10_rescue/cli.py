@@ -40,6 +40,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--scan-start", default="0x0", help="first address for the full-flash scan")
     p.add_argument("--scan-end", default="0x0", help="last address for the full-flash scan; 0 means flash_max")
     p.add_argument(
+        "--write-chunk",
+        type=int,
+        default=ToolConfig.write_chunk,
+        help="bytes per WRITE_DATA packet; lower it if the full-size write test fails",
+    )
+    p.add_argument(
         "--command",
         choices=[
             "menu", "scan", "test", "verify", "backup", "apply", "reboot",
@@ -66,6 +72,7 @@ def cfg_from_args(args) -> ToolConfig:
         assume_yes=args.yes,
         scan_start=int(str(args.scan_start), 0),
         scan_end=int(str(args.scan_end), 0),
+        write_chunk=args.write_chunk,
     )
 
 
@@ -321,6 +328,13 @@ async def action_write_test(cfg: ToolConfig):
     Upstream reported 0x05 timing out, and every repair that can be undone
     depends on it. NOR flash clears bits without an erase, so this writes into
     blank padding at the end of the identity sector and reads it back.
+
+    Two writes, not one. A 4-byte probe answers "does the opcode work at all";
+    a full `write_chunk`-sized probe answers "does it work at the size the
+    repair uses", and only the second question is the one that matters. The
+    repair writes the sector back in `write_chunk` blocks *after* erasing it,
+    so a size limit discovered there would strand the cube with a blank
+    identity sector — restoring the backup goes through the same writes.
     """
     section("WRITE_DATA capability test", cfg.color)
     fd, client = await connect_target(cfg)
@@ -328,18 +342,23 @@ async def action_write_test(cfg: ToolConfig):
         a1, ota = await _get_a1_and_ota(cfg, client, fd.adv)
         try:
             sector = cfg.default_identity_sector
-            probe_addr = sector + SECTOR_SIZE - 16
-            current = await ota.read_flash(probe_addr, 16)
-            print(f"Probe area 0x{probe_addr:08x}: {current.hex(' ')}")
+            chunk_addr = sector + SECTOR_SIZE - cfg.write_chunk
+            small_addr = chunk_addr - 8
+            probe_len = 8 + cfg.write_chunk
 
+            current = await ota.read_flash(small_addr, probe_len)
+            print(f"Probe area 0x{small_addr:08x}..0x{small_addr + probe_len:08x}")
             if any(b != 0xFF for b in current):
+                print(current.hex(' '))
                 fail("Probe area is not blank; refusing to write over existing bytes.", cfg.color)
                 return
+            print("  blank, as expected")
 
             await backup_sector(ota, sector, cfg, label="pre_write_test")
             warn(
-                "This writes 4 bytes into unused padding at the end of the identity sector. "
-                "It does not touch the identity record, and a later repair erases the sector anyway.",
+                f"This writes 4 bytes, then {cfg.write_chunk} bytes, into unused padding at the "
+                "end of the identity sector. It does not touch the identity record, and a later "
+                "repair erases the sector anyway.",
                 cfg.color,
             )
             if not cfg.assume_yes and not prompt_yes_no("Run the write test?", default=False):
@@ -348,7 +367,7 @@ async def action_write_test(cfg: ToolConfig):
 
             probe = bytes.fromhex("a5 5a a5 5a")
             try:
-                raw = await ota.write_data(probe_addr, probe)
+                raw = await ota.write_data(small_addr, probe)
                 print(f"WRITE_DATA response: {raw.hex(' ')}")
             except TimeoutError as e:
                 fail(f"WRITE_DATA timed out: {e}", cfg.color)
@@ -358,14 +377,39 @@ async def action_write_test(cfg: ToolConfig):
                 fail(f"WRITE_DATA rejected: {e!r}", cfg.color)
                 return
 
-            readback = await ota.read_flash(probe_addr, 16)
+            readback = await ota.read_flash(small_addr, 4)
             print(f"Readback:            {readback.hex(' ')}")
-            if readback[:4] == probe:
-                ok("WRITE_DATA works on this cube. The reversible write repair is available.", cfg.color)
-            elif all(b == 0xFF for b in readback):
-                fail("Write was accepted but nothing changed — the command is a no-op here.", cfg.color)
+            if readback != probe:
+                if all(b == 0xFF for b in readback):
+                    fail("Write was accepted but nothing changed — the command is a no-op here.", cfg.color)
+                else:
+                    fail("Readback does not match what was written; do not use the write repair.", cfg.color)
+                return
+            ok("WRITE_DATA works for a 4-byte payload.", cfg.color)
+
+            # The full-size packet is 9 + write_chunk bytes and has to survive the
+            # negotiated ATT MTU, which the 4-byte probe never exercised. A counting
+            # pattern makes a truncated write show up as the offset it stopped at.
+            block = (bytes(range(256)) * (cfg.write_chunk // 256 + 1))[:cfg.write_chunk]
+            smaller = max(4, cfg.write_chunk // 4)
+            info(f"Writing a full {cfg.write_chunk}-byte block at 0x{chunk_addr:08x}...", cfg.color)
+            try:
+                await ota.write_data(chunk_addr, block)
+            except Exception as e:
+                fail(f"Full-size WRITE_DATA failed: {e!r}", cfg.color)
+                warn(f"Retry this test with --write-chunk {smaller} before using the write repair.", cfg.color)
+                return
+
+            readback = await ota.read_flash(chunk_addr, cfg.write_chunk)
+            if readback == block:
+                ok(f"WRITE_DATA works at {cfg.write_chunk} bytes. The reversible write repair is available.", cfg.color)
             else:
-                fail("Readback does not match what was written; do not use the write repair.", cfg.color)
+                landed = next(
+                    (i for i, (a, b) in enumerate(zip(readback, block)) if a != b),
+                    min(len(readback), len(block)),
+                )
+                fail(f"Only the first {landed} bytes read back correctly.", cfg.color)
+                warn(f"Retry this test with --write-chunk {smaller} before using the write repair.", cfg.color)
         finally:
             await ota.stop()
     finally:
@@ -408,7 +452,11 @@ async def action_repair_write(cfg: ToolConfig):
             clean_name = cfg.clean_name_bytes
             print(f"\nCurrent name: {record.name.hex(' ')}  {record.name!r}")
             print(f"Repaired name: {clean_name.hex(' ')}  {clean_name!r}")
-            repaired = build_repaired_sector(current, record, clean_name)
+            try:
+                repaired = build_repaired_sector(current, record, clean_name)
+            except ValueError as e:
+                fail(f"Refusing to rewrite: {e}", cfg.color)
+                return
 
             print("\nBefore (first 64 bytes):")
             hexdump(current[:64], sector)
@@ -487,6 +535,11 @@ async def action_restore(cfg: ToolConfig):
                 return
 
             await ota.page_erase(sector)
+            blank = await ota.read_flash(sector, SECTOR_SIZE)
+            if not all(b == 0xFF for b in blank):
+                fail("Erase verification failed; not writing on top of a dirty sector.", cfg.color)
+                return
+
             await ota.write_flash(sector, data.rstrip(b"\xFF"))
             verify = await ota.read_flash(sector, SECTOR_SIZE)
             if verify == data:
@@ -529,7 +582,7 @@ Read-only
   3) Verify identity/model flash state
   4) Backup identity sector
   8) Full-flash identity scan (is there a pristine template?)
-  9) WRITE_DATA capability test (writes 4 bytes of blank padding)
+  9) WRITE_DATA capability test (writes into blank padding, small then full-size)
 
 Repair
  10) Rewrite identity record   (erase + write; reversible, needs 9 to pass)

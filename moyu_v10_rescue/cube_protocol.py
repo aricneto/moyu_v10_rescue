@@ -56,10 +56,34 @@ class A1Info:
     raw: bytes
     decrypted: bytes
     model_bytes: bytes
+    hw_version: tuple[int, int] | None = None
+    sw_version: tuple[int, int] | None = None
+
+    @classmethod
+    def from_decrypted(cls, raw: bytes, dec: bytes) -> "A1Info":
+        # Layout per MOYU_PROTOCOL_README: type, 8-byte model, HW major/minor,
+        # SW major/minor. The versions matter because WRITE_DATA is only known
+        # to time out on one firmware, and comparing them is how you tell
+        # whether this cube is that firmware.
+        return cls(
+            raw=raw,
+            decrypted=dec,
+            model_bytes=dec[1:9],
+            hw_version=(dec[9], dec[10]) if len(dec) > 10 else None,
+            sw_version=(dec[11], dec[12]) if len(dec) > 12 else None,
+        )
 
     @property
     def model_text(self) -> str:
         return self.model_bytes.decode("ascii", errors="replace")
+
+    @staticmethod
+    def _version_text(version: tuple[int, int] | None) -> str:
+        return f"{version[0]}.{version[1]}" if version else "unknown"
+
+    @property
+    def version_text(self) -> str:
+        return f"hw {self._version_text(self.hw_version)}, sw {self._version_text(self.sw_version)}"
 
 
 @dataclass
@@ -175,11 +199,12 @@ class V10Protocol:
                 print("  no valid A1 response")
                 continue
 
-            info = A1Info(raw=raw, decrypted=dec, model_bytes=dec[1:9])
+            info = A1Info.from_decrypted(raw, dec)
             ok("A1 response decrypted successfully.", self.cfg.color)
             print(f"  raw:       {hex_bytes(raw)}")
             print(f"  decrypted: {hex_bytes(dec)}")
             print(f"  model:     {info.model_bytes.hex(' ')} / {info.model_text!r}")
+            print(f"  versions:  {info.version_text}")
             return info
 
         self.crypto = None

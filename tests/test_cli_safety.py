@@ -12,6 +12,8 @@ from moyu_v10_rescue.config import ToolConfig
 from moyu_v10_rescue.cube_protocol import A1Info
 from moyu_v10_rescue.identity import Finding, IdentityScanResult, SECTOR_SIZE
 
+from .cube_fixtures import A1_MODEL_1322 as A1_1322, MFG_RECORD_1322, SECTOR_1322
+
 
 def run(coro):
     return asyncio.run(coro)
@@ -183,16 +185,8 @@ class RWFakeOTA:
         return b""
 
 
-# Real bytes from cube CF:30:16:02:13:22 — model corrupted to 5 bytes, AD length 0x0b.
-CORRUPT_1322_HEAD = bytes.fromhex(
-    "25 12 23 cb 0b 09 e5 a7 01 8b 01 5f 31 33 32 32"
-    "0c ff 00 00 00 00 30 22 13 02 16 30 cf"
-)
-A1_1322 = bytes.fromhex("e5 a7 01 8b 01 00 00 00")
-
-
 def sector_1322() -> bytes:
-    return CORRUPT_1322_HEAD + b"\xFF" * (SECTOR_SIZE - len(CORRUPT_1322_HEAD))
+    return SECTOR_1322
 
 
 def test_action_repair_write_rewrites_the_record_and_verifies(monkeypatch):
@@ -207,7 +201,9 @@ def test_action_repair_write_rewrites_the_record_and_verifies(monkeypatch):
     assert ota.mem[0x004] == 0x0E  # AD length corrected for the longer name
     # The manufacturer record carries the MAC the AES salt comes from; losing it
     # would be worse than the corruption being repaired.
-    assert bytes.fromhex("0c ff 00 00 00 00 30 22 13 02 16 30 cf") in bytes(ota.mem)
+    assert bytes(ota.mem[0x013:0x020]) == MFG_RECORD_1322
+    # ...and the unidentified structure after the advertising area does not move.
+    assert bytes(ota.mem[0x020:0x02E]) == SECTOR_1322[0x020:0x02E]
 
 
 def test_action_repair_write_refuses_when_the_record_structure_is_unknown(monkeypatch):
@@ -259,14 +255,130 @@ def test_action_repair_write_leaves_the_sector_erased_when_the_write_fails(monke
     assert all(b == 0xFF for b in ota.mem)
 
 
+class NoOpWriteOTA(RWFakeOTA):
+    """Accepts WRITE_DATA and changes nothing — the silent-failure case."""
+
+    async def write_data(self, addr, data, timeout=6.0):
+        self.writes.append((addr, bytes(data)))
+        return b""
+
+
+class TruncatingOTA(RWFakeOTA):
+    """Drops everything past `limit` bytes of a WRITE_DATA payload, as a too-small MTU would."""
+
+    def __init__(self, sector_bytes, limit, **kwargs):
+        super().__init__(sector_bytes, **kwargs)
+        self.limit = limit
+
+    async def write_data(self, addr, data, timeout=6.0):
+        await self.write_flash(addr, data[:self.limit])
+        return b""
+
+
+def probe_offsets(cfg: ToolConfig) -> tuple[int, int]:
+    """Sector-relative offsets of the small and full-size write probes."""
+    chunk = SECTOR_SIZE - cfg.write_chunk
+    return chunk - 8, chunk
+
+
 def test_action_write_test_refuses_when_the_probe_area_is_not_blank(monkeypatch):
     cfg = ToolConfig(color=False, target_name_suffix="1322")
+    small_off, _ = probe_offsets(cfg)
     dirty = bytearray(b"\xFF" * SECTOR_SIZE)
-    dirty[-16:] = bytes(range(16))
+    dirty[small_off:small_off + 16] = bytes(range(16))
     ota = RWFakeOTA(bytes(dirty))
     install_common_apply_mocks(monkeypatch, A1_1322, ota, sector_choice=0x7B000, prompt=True)
 
     run(cli.action_write_test(cfg))
+
+    assert ota.writes == []
+
+
+def test_action_write_test_probes_both_a_small_and_a_full_chunk_write(monkeypatch):
+    # A 4-byte write proves the opcode; only a write_chunk-sized one proves the
+    # size the repair actually uses after it has erased the sector.
+    cfg = ToolConfig(color=False, target_name_suffix="1322", assume_yes=True)
+    small_off, chunk_off = probe_offsets(cfg)
+    ota = RWFakeOTA(b"\xFF" * SECTOR_SIZE)
+    install_common_apply_mocks(monkeypatch, A1_1322, ota, sector_choice=0x7B000, prompt=True)
+
+    run(cli.action_write_test(cfg))
+
+    assert [(addr - 0x7B000, len(data)) for addr, data in ota.writes] == [
+        (small_off, 4),
+        (chunk_off, cfg.write_chunk),
+    ]
+    assert bytes(ota.mem[small_off:small_off + 4]) == bytes.fromhex("a5 5a a5 5a")
+    assert not ota.erased
+
+
+def test_action_write_test_stops_when_the_small_probe_does_not_read_back(monkeypatch):
+    cfg = ToolConfig(color=False, target_name_suffix="1322", assume_yes=True)
+    ota = NoOpWriteOTA(b"\xFF" * SECTOR_SIZE)
+    install_common_apply_mocks(monkeypatch, A1_1322, ota, sector_choice=0x7B000, prompt=True)
+
+    run(cli.action_write_test(cfg))
+
+    assert len(ota.writes) == 1
+
+
+def test_action_write_test_catches_a_full_size_write_that_is_truncated(monkeypatch):
+    # The small probe passes and the big one is silently cut short — the exact
+    # failure that would otherwise surface after the repair had erased the sector.
+    cfg = ToolConfig(color=False, target_name_suffix="1322", assume_yes=True)
+    _, chunk_off = probe_offsets(cfg)
+    ota = TruncatingOTA(b"\xFF" * SECTOR_SIZE, limit=20)
+    install_common_apply_mocks(monkeypatch, A1_1322, ota, sector_choice=0x7B000, prompt=True)
+
+    run(cli.action_write_test(cfg))
+
+    assert len(ota.writes) == 2
+    assert bytes(ota.mem[chunk_off + 20:chunk_off + cfg.write_chunk]) == b"\xFF" * (cfg.write_chunk - 20)
+
+
+def test_write_test_probes_leave_the_repair_able_to_run(monkeypatch):
+    # The probes land in blank padding far past the record, so running option 9
+    # first cannot block option 10.
+    cfg = ToolConfig(color=False, target_name_suffix="1322", assume_yes=True)
+    ota = RWFakeOTA(sector_1322())
+    install_common_apply_mocks(monkeypatch, A1_1322, ota, sector_choice=0x7B000, prompt=True)
+
+    run(cli.action_write_test(cfg))
+    run(cli.action_repair_write(cfg))
+
+    assert ota.erased
+    assert b"WCU_MY32_1322" in bytes(ota.mem)
+    assert ota.mem[0x004] == 0x0E
+
+
+async def _fake_connect_target(cfg):
+    return SimpleNamespace(adv=SimpleNamespace(manufacturer_data={})), FakeClient()
+
+
+def _with_start(ota):
+    async def start():
+        return None
+
+    ota.start = start
+    return ota
+
+
+def test_action_restore_does_not_write_when_the_erase_did_not_take(monkeypatch, tmp_path):
+    class DeadEraseOTA(RWFakeOTA):
+        async def page_erase(self, sector):
+            self.erased = True  # reports success, sector unchanged
+
+    cfg = ToolConfig(color=False, target_name_suffix="1322")
+    backup = tmp_path / "identity_sector_0x0007b000_20260101_120000.bin"
+    backup.write_bytes(sector_1322())
+    ota = DeadEraseOTA(bytearray(b"\x00" * SECTOR_SIZE))
+
+    monkeypatch.setattr("builtins.input", lambda *_: str(backup))
+    monkeypatch.setattr(cli, "connect_target", _fake_connect_target)
+    monkeypatch.setattr(cli, "FreqchipOTA", lambda client, cfg: _with_start(ota))
+    monkeypatch.setattr(cli, "prompt_exact", lambda prompt_text, expected: True)
+
+    run(cli.action_restore(cfg))
 
     assert ota.writes == []
 

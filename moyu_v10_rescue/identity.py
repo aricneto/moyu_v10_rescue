@@ -34,6 +34,26 @@ class IdentityScanResult:
 # Advertising data type for a complete local name (Bluetooth Core assigned numbers).
 AD_TYPE_COMPLETE_LOCAL_NAME = 0x09
 
+# A zero length byte ends a chain of AD records. What follows, up to the next
+# structure in the sector, is zero padding.
+AD_TERMINATOR = 0x00
+
+
+def ad_chain_end(sector: bytes, start: int) -> int | None:
+    """Offset of the terminator byte ending the AD record chain at `start`.
+
+    Each record is `length, type, data...`, so the next one begins `1 + length`
+    bytes on. Returns None if the chain runs off the sector without a
+    terminator, which means the layout is not what this code assumes.
+    """
+    off = start
+    while off < len(sector):
+        length = sector[off]
+        if length == AD_TERMINATOR:
+            return off
+        off += 1 + length
+    return None
+
 
 @dataclass
 class IdentityRecord:
@@ -108,22 +128,52 @@ def parse_identity_record(
 def build_repaired_sector(sector: bytes, record: IdentityRecord, clean_name: bytes) -> bytes:
     """A full sector image with the name record replaced by `clean_name`.
 
-    The repaired name is usually *longer* than the corrupt one, so the AD
-    records after it shift. That is correct for a chain of length-prefixed
-    records, and the manufacturer-data block that follows — which carries the
-    MAC the AES salt is derived from — is copied through untouched.
+    The repaired name is usually *longer* than the corrupt one, and the records
+    after it — including the manufacturer-data block carrying the MAC the AES
+    salt comes from — shift up to stay a contiguous chain. What must **not**
+    move is whatever follows the chain: on both cubes we have bytes for, an
+    unidentified structure sits at sector+0x020 regardless of how long the name
+    record is, and on the cube with the shortened name the gap in front of it is
+    zero-filled. That padding is where the growth is absorbed, so every absolute
+    offset past it is preserved.
 
     Erasing a sector and writing this back is reversible (the pre-image is on
     disk); erasing alone is not.
+
+    Raises ValueError when the growth cannot be absorbed, rather than moving
+    data whose position may be load-bearing.
     """
-    repaired = (
+    head = (
         sector[:record.header_offset]
         + bytes([len(clean_name) + 1, AD_TYPE_COMPLETE_LOCAL_NAME])
         + clean_name
-        + sector[record.tail_offset:]
     )
-    repaired = repaired[:SECTOR_SIZE]
-    return repaired + b"\xFF" * (SECTOR_SIZE - len(repaired))
+    growth = len(clean_name) - len(record.name)
+    if growth == 0:
+        return head + sector[record.tail_offset:]
+
+    chain_end = ad_chain_end(sector, record.header_offset)
+    if chain_end is None:
+        raise ValueError("the advertising records do not end in a terminator byte")
+
+    pad_end = chain_end
+    while pad_end < SECTOR_SIZE and sector[pad_end] == 0x00:
+        pad_end += 1
+    padding = pad_end - chain_end
+
+    if padding < growth:
+        raise ValueError(
+            f"the corrected name is {growth} bytes longer, but only {padding} padding "
+            f"byte(s) follow the advertising records at sector+0x{chain_end:03x}; "
+            f"repairing would move the data at sector+0x{pad_end:03x}"
+        )
+
+    return (
+        head
+        + sector[record.tail_offset:chain_end]
+        + bytes(padding - growth)
+        + sector[pad_end:]
+    )
 
 
 def infer_user_start(storage_base: int | None, cfg: ToolConfig) -> int | None:

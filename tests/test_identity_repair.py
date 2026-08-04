@@ -1,17 +1,9 @@
 """Locating and rebuilding the advertising identity record.
 
-Fixtures are real sector bytes from two cubes with the same failure mode but
-different corruption lengths:
-
-  8DD8 (tests/fixtures/logs/flash_scan_before_erase.log)
-      the 8-byte model was overwritten with 8 junk bytes, so the record kept
-      its original length and the A1 model bytes appeared verbatim in flash.
-
-  1322 (HWTrainer session, 2026-08-04)
-      the 8-byte model was replaced by 5 junk bytes and the AD length byte was
-      rewritten to match, so the record is 3 bytes shorter and the A1 field --
-      always 8 bytes wide -- comes back zero-padded.
+Sector bytes for both cubes live in tests/cube_fixtures.py.
 """
+
+import pytest
 
 from moyu_v10_rescue.config import ToolConfig
 from moyu_v10_rescue.identity import (
@@ -22,30 +14,13 @@ from moyu_v10_rescue.identity import (
     sector_from_backup_name,
 )
 
-
-def sector_from(head: bytes) -> bytes:
-    return bytes(head) + b"\xFF" * (SECTOR_SIZE - len(head))
-
-
-# Sector 0x0007b000, cube CF:30:16:02:13:22. Model field is 5 junk bytes.
-SECTOR_1322 = sector_from(bytes.fromhex(
-    "25 12 23 cb"                          # record header (unidentified)
-    "0b 09"                                # AD: length 11, type 0x09 complete local name
-    "e5 a7 01 8b 01 5f 31 33 32 32"        # corrupt model + "_1322"
-    "0c ff 00 00 00 00 30 22 13 02 16 30 cf"  # AD: manufacturer data, reversed MAC
-    "00 00 00 19 02 24 bc 3a 00 ff ff 13 06 25 ac d2 0f"
-))
-
-# Sector 0x0007b000, cube CF:30:16:01:8D:D8. Model field is 8 junk bytes.
-SECTOR_8DD8 = sector_from(bytes.fromhex(
-    "00 00 00 00"
-    "0e 09"                                # AD: length 14 -- original length preserved
-    "22 f9 81 60 bb e0 96 53 5f 38 44 44 38"  # corrupt model + "_8DD8"
-    "0c ff 00 00 00 00 30 d8 8d 01 16 30 cf"
-))
-
-A1_MODEL_1322 = bytes.fromhex("e5 a7 01 8b 01 00 00 00")  # 5 real bytes + A1 padding
-A1_MODEL_8DD8 = bytes.fromhex("22 f9 81 60 bb e0 96 53")  # all 8 bytes real
+from .cube_fixtures import (
+    A1_MODEL_1322,
+    A1_MODEL_8DD8,
+    MFG_RECORD_1322,
+    SECTOR_1322,
+    SECTOR_8DD8,
+)
 
 
 def cfg_1322() -> ToolConfig:
@@ -120,16 +95,58 @@ class TestBuildRepairedSector:
         assert repaired[:0x004] == SECTOR_1322[:0x004]
 
     def test_shifts_the_manufacturer_record_intact(self):
-        # The repaired name is 3 bytes longer, so everything after it moves. The
-        # manufacturer block carries the MAC that seeds the AES salt, so losing
-        # or truncating it would be worse than the corruption being repaired.
+        # The repaired name is 3 bytes longer, so the manufacturer block moves up
+        # to keep the AD chain contiguous. It carries the MAC that seeds the AES
+        # salt, so losing or truncating it would be worse than the corruption.
         cfg = cfg_1322()
         record = parse_identity_record(SECTOR_1322, A1_MODEL_1322, cfg)
         repaired = build_repaired_sector(SECTOR_1322, record, cfg.clean_name_bytes)
 
-        mfg = bytes.fromhex("0c ff 00 00 00 00 30 22 13 02 16 30 cf")
-        assert repaired[0x013:0x013 + len(mfg)] == mfg
-        assert SECTOR_1322[record.tail_offset:].rstrip(b"\xFF") in repaired
+        assert repaired[0x013:0x013 + len(MFG_RECORD_1322)] == MFG_RECORD_1322
+        # ...landing exactly where the 8DD8 cube, whose record was never shortened,
+        # has its own.
+        assert SECTOR_8DD8[0x013:0x015] == MFG_RECORD_1322[:2]
+
+    def test_keeps_the_trailing_structure_at_its_absolute_offset(self):
+        # Both cubes carry an unidentified structure at sector+0x020, and on the
+        # 1322 cube the 3 bytes in front of it are zero padding created when the
+        # name record was shortened. Nothing after that padding may move: the AD
+        # chain terminates before it, so firmware cannot be reaching it by walking
+        # records — it must be using the offset.
+        cfg = cfg_1322()
+        record = parse_identity_record(SECTOR_1322, A1_MODEL_1322, cfg)
+        repaired = build_repaired_sector(SECTOR_1322, record, cfg.clean_name_bytes)
+
+        assert SECTOR_1322[0x01D:0x020] == b"\x00\x00\x00"
+        assert repaired[0x020:0x02E] == SECTOR_1322[0x020:0x02E]
+        assert repaired[0x020] == 0x19
+
+    def test_absorbs_the_growth_from_the_padding_not_the_end_of_the_sector(self):
+        cfg = cfg_1322()
+        record = parse_identity_record(SECTOR_1322, A1_MODEL_1322, cfg)
+        repaired = build_repaired_sector(SECTOR_1322, record, cfg.clean_name_bytes)
+
+        # The AD chain now runs right up to the structure, with no padding left.
+        assert repaired[0x01F] != 0x00
+        assert repaired[0x2E:] == SECTOR_1322[0x2E:]
+
+    def test_refuses_when_the_padding_cannot_absorb_the_growth(self):
+        cfg = cfg_1322()
+        cramped = bytearray(SECTOR_1322)
+        cramped[0x01E] = 0x77  # one padding byte short of the 3 the repair needs
+        record = parse_identity_record(bytes(cramped), A1_MODEL_1322, cfg)
+
+        with pytest.raises(ValueError, match="only 1 padding byte"):
+            build_repaired_sector(bytes(cramped), record, cfg.clean_name_bytes)
+
+    def test_refuses_when_the_advertising_chain_has_no_terminator(self):
+        cfg = cfg_1322()
+        endless = bytearray(SECTOR_1322)
+        endless[0x010] = 0x20  # manufacturer record overruns its terminator
+        record = parse_identity_record(bytes(endless), A1_MODEL_1322, cfg)
+
+        with pytest.raises(ValueError, match="terminator"):
+            build_repaired_sector(bytes(endless), record, cfg.clean_name_bytes)
 
     def test_keeps_the_sector_exactly_one_page(self):
         cfg = cfg_1322()

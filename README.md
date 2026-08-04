@@ -181,8 +181,16 @@ The scan is slow — roughly one BLE round trip per `--read-chunk` bytes, so a f
 
 ### 9. WRITE_DATA capability test
 
-Writes four bytes into blank padding at the end of the identity sector and reads
-them back. Nothing live is touched, and a backup is taken first.
+Writes into blank padding at the end of the identity sector and reads it back.
+Nothing live is touched, and a backup is taken first.
+
+It writes twice: four bytes, then a full `--write-chunk`-sized block. The second
+write is the one that matters. Option 10 writes the sector back in `--write-chunk`
+blocks *after* erasing it, and restoring the backup goes through the same writes,
+so a size limit found only at that point would leave the cube with a blank
+identity sector and no way back. If the small write passes and the big one does
+not, re-run with a smaller `--write-chunk` until it passes, and use the same value
+for the repair.
 
 `WRITE_DATA` (`0x05`) timed out during the original recovery, so it is not used on
 any automatic path. This is how you find out whether *this* cube accepts it, which
@@ -192,8 +200,16 @@ decides whether option 10 is available.
 
 The repair to prefer when option 9 passes. Reads the sector, locates the
 advertising name record, rebuilds it with the correct model name — fixing the AD
-length byte and shifting the manufacturer-data record that follows — then erases
-the sector and writes the corrected image back.
+length byte and moving the manufacturer-data record up to keep the record chain
+contiguous — then erases the sector and writes the corrected image back.
+
+What it will not move is anything past the advertising records. Both cubes this
+tool has sector bytes for carry an unidentified structure at `sector+0x020`, and
+on the cube whose name record was *shortened* the gap in front of it is zero
+padding — that is, the firmware kept the structure's offset rather than sliding it
+down. The AD chain terminates before it, so nothing can be reaching it by walking
+records. Growth is therefore absorbed by that padding, and the repair refuses if
+there is not enough of it rather than shifting data whose position may matter.
 
 It refuses unless the model bytes are found *inside a real AD name record*
 (`0x09` type byte in front, expected suffix at the end). Corrupt bytes can be
@@ -236,14 +252,14 @@ Gather evidence first, then pick a repair based on what it says:
 3. verify          -> is the live record located?
 4. backup
 5. fullscan        -> does a pristine WCU_MY32 template exist?
-6. writetest       -> does this firmware accept WRITE_DATA?
+6. writetest       -> does this firmware accept WRITE_DATA, at the size repair uses?
 ```
 
 Then:
 
 | writetest | fullscan | Do this |
 |-----------|----------|---------|
-| passes    | either   | `repair` (option 10) — reversible |
+| passes    | either   | `repair` (option 10) — reversible, with the same `--write-chunk` the test passed at |
 | fails     | template found | `apply` (option 5), then `reboot` — the upstream path |
 | fails     | no template    | Stop. Erasing may leave no identity to regenerate from, and the manufacturer data that seeds the AES salt lives in the same record. A cube with a corrupt *name* is still usable by software that does not filter on it; a cube with no identity record may not be. |
 
