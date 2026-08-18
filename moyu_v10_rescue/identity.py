@@ -129,8 +129,8 @@ def build_repaired_sector(sector: bytes, record: IdentityRecord, clean_name: byt
     """A full sector image with the name record replaced by `clean_name`.
 
     The repaired name is usually *longer* than the corrupt one, and the records
-    after it — including the manufacturer-data block carrying the MAC the AES
-    salt comes from — shift up to stay a contiguous chain. What must **not**
+    after it - including the manufacturer-data block carrying the MAC the AES
+    salt comes from - shift up to stay a contiguous chain. What must **not**
     move is whatever follows the chain: on both cubes we have bytes for, an
     unidentified structure sits at sector+0x020 regardless of how long the name
     record is, and on the cube with the shortened name the gap in front of it is
@@ -262,7 +262,7 @@ async def identity_scan(
         print("Could not infer user/config start; using broad fallback scan.")
 
     # An explicit range overrides the inferred window. The default window is
-    # centred on user/config space, which is where a *live* record lives — but a
+    # centred on user/config space, which is where a *live* record lives - but a
     # pristine factory template can sit below it, in firmware territory, and
     # whether one exists decides whether erase-and-reboot has anything to
     # regenerate from.

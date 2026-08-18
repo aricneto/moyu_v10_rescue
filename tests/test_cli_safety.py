@@ -243,7 +243,7 @@ def test_action_repair_write_aborts_on_a_wrong_confirmation_phrase(monkeypatch):
 
 def test_action_repair_write_leaves_the_sector_erased_when_the_write_fails(monkeypatch):
     # The degraded outcome must be exactly the erase-only state, which the saved
-    # backup can be restored over — not a half-written record.
+    # backup can be restored over - not a half-written record.
     cfg = ToolConfig(color=False, target_name_suffix="1322")
     ota = RWFakeOTA(sector_1322(), write_ok=False)
     install_common_apply_mocks(monkeypatch, A1_1322, ota, sector_choice=0x7B000, prompt=True)
@@ -256,7 +256,7 @@ def test_action_repair_write_leaves_the_sector_erased_when_the_write_fails(monke
 
 
 class NoOpWriteOTA(RWFakeOTA):
-    """Accepts WRITE_DATA and changes nothing — the silent-failure case."""
+    """Accepts WRITE_DATA and changes nothing - the silent-failure case."""
 
     async def write_data(self, addr, data, timeout=6.0):
         self.writes.append((addr, bytes(data)))
@@ -323,7 +323,7 @@ def test_action_write_test_stops_when_the_small_probe_does_not_read_back(monkeyp
 
 
 def test_action_write_test_catches_a_full_size_write_that_is_truncated(monkeypatch):
-    # The small probe passes and the big one is silently cut short — the exact
+    # The small probe passes and the big one is silently cut short - the exact
     # failure that would otherwise surface after the repair had erased the sector.
     cfg = ToolConfig(color=False, target_name_suffix="1322", assume_yes=True)
     _, chunk_off = probe_offsets(cfg)

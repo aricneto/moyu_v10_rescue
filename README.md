@@ -23,7 +23,7 @@ This tool can erase one 4 KB flash sector when you choose the repair option. Use
 > **Find out what broke the cube before you repair it.** The corruption is usually
 > caused by an app connecting with the wrong MAC: a wrong MAC is a wrong AES key,
 > and the cube has no authentication step, so it decrypts the write with *its* key
-> and executes the resulting 20 bytes as a command. It is deterministic — repair
+> and executes the resulting 20 bytes as a command. It is deterministic - repair
 > the cube, reconnect the same app, and it breaks again identically. We watched it
 > happen. See [`docs/what-corrupts-the-identity-record.md`](docs/what-corrupts-the-identity-record.md).
 
@@ -183,7 +183,7 @@ at `0x000513a5`, below user/config space, which is the most likely thing the
 firmware regenerated the identity from after erase. A cube without one is not the
 same situation, and erase-only is a much larger bet there.
 
-The scan is slow — roughly one BLE round trip per `--read-chunk` bytes, so a full
+The scan is slow - roughly one BLE round trip per `--read-chunk` bytes, so a full
 1 MB sweep is several minutes.
 
 ### 9. WRITE_DATA capability test
@@ -206,14 +206,14 @@ decides whether option 10 is available.
 ### 10. Rewrite identity record (erase + write)
 
 The repair to prefer when option 9 passes. Reads the sector, locates the
-advertising name record, rebuilds it with the correct model name — fixing the AD
+advertising name record, rebuilds it with the correct model name - fixing the AD
 length byte and moving the manufacturer-data record up to keep the record chain
-contiguous — then erases the sector and writes the corrected image back.
+contiguous - then erases the sector and writes the corrected image back.
 
 What it will not move is anything past the advertising records. Both cubes this
 tool has sector bytes for carry an unidentified structure at `sector+0x020`, and
 on the cube whose name record was *shortened* the gap in front of it is zero
-padding — that is, the firmware kept the structure's offset rather than sliding it
+padding - that is, the firmware kept the structure's offset rather than sliding it
 down. The AD chain terminates before it, so nothing can be reaching it by walking
 records. Growth is therefore absorbed by that padding, and the repair refuses if
 there is not enough of it rather than shifting data whose position may matter.
@@ -223,7 +223,7 @@ It refuses unless the model bytes are found *inside a real AD name record*
 anything, so a bare pattern hit is not enough to justify rewriting.
 
 The important property is that it is **reversible**: the pre-image is saved first,
-and if the write fails the sector is simply left erased — the same state option 5
+and if the write fails the sector is simply left erased - the same state option 5
 produces, from which you can retry or restore.
 
 ### 11. Restore identity sector from a backup
@@ -266,8 +266,8 @@ Then:
 
 | writetest | fullscan | Do this |
 |-----------|----------|---------|
-| passes    | either   | `repair` (option 10) — reversible, with the same `--write-chunk` the test passed at |
-| fails     | template found | `apply` (option 5), then `reboot` — the upstream path |
+| passes    | either   | `repair` (option 10) - reversible, with the same `--write-chunk` the test passed at |
+| fails     | template found | `apply` (option 5), then `reboot` - the upstream path |
 | fails     | no template    | Stop. Erasing may leave no identity to regenerate from, and the manufacturer data that seeds the AES salt lives in the same record. A cube with a corrupt *name* is still usable by software that does not filter on it; a cube with no identity record may not be. |
 
 Finish with `reboot`, then `test` again. Success is `A1` reporting `WCU_MY32`.
@@ -306,8 +306,8 @@ The OS or scanner may cache old names. Reboot the cube using option 6, toggle Bl
 
 `A1` always returns an 8-byte model field and zero-pads it, but flash stores only
 the real bytes followed immediately by the name suffix. When the corruption is
-shorter than 8 bytes — e.g. `e5 a7 01 8b 01` in place of `WCU_MY32`, with the AD
-length byte rewritten from `0x0e` to `0x0b` — searching flash for the padded field
+shorter than 8 bytes - e.g. `e5 a7 01 8b 01` in place of `WCU_MY32`, with the AD
+length byte rewritten from `0x0e` to `0x0b` - searching flash for the padded field
 finds nothing, and every locate-based safety check refuses.
 
 The scan strips that padding before searching, which is a no-op when all eight

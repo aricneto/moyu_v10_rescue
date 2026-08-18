@@ -276,7 +276,7 @@ async def action_full_scan(cfg: ToolConfig):
     """Read-only sweep of the whole flash, looking for a pristine model template.
 
     The default scan window is centred on user/config space, where the *live*
-    record is. A factory template can sit below that, in firmware territory —
+    record is. A factory template can sit below that, in firmware territory -
     on the 8DD8 cube one did, at 0x000513a5. Whether this cube has one is the
     question that decides if erase-and-reboot has anything to regenerate from.
     """
@@ -311,7 +311,7 @@ async def action_full_scan(cfg: ToolConfig):
                 warn("No pristine 'WCU_MY32' bytes anywhere in the scanned range.", cfg.color)
                 warn(
                     "The cube that recovered by erase+reboot had one. Without it, erasing "
-                    "risks leaving no identity at all — prefer the write repair.",
+                    "risks leaving no identity at all - prefer the write repair.",
                     cfg.color,
                 )
             if live:
@@ -334,7 +334,7 @@ async def action_write_test(cfg: ToolConfig):
     repair uses", and only the second question is the one that matters. The
     repair writes the sector back in `write_chunk` blocks *after* erasing it,
     so a size limit discovered there would strand the cube with a blank
-    identity sector — restoring the backup goes through the same writes.
+    identity sector - restoring the backup goes through the same writes.
     """
     section("WRITE_DATA capability test", cfg.color)
     fd, client = await connect_target(cfg)
@@ -381,7 +381,7 @@ async def action_write_test(cfg: ToolConfig):
             print(f"Readback:            {readback.hex(' ')}")
             if readback != probe:
                 if all(b == 0xFF for b in readback):
-                    fail("Write was accepted but nothing changed — the command is a no-op here.", cfg.color)
+                    fail("Write was accepted but nothing changed - the command is a no-op here.", cfg.color)
                 else:
                     fail("Readback does not match what was written; do not use the write repair.", cfg.color)
                 return
@@ -420,7 +420,7 @@ async def action_repair_write(cfg: ToolConfig):
     """Erase the identity sector and write back a corrected image.
 
     Reversible: the pre-image is saved first, and a failed write leaves the
-    sector erased — the same state the erase-only repair produces, from which
+    sector erased - the same state the erase-only repair produces, from which
     this can simply be retried or the backup restored.
     """
     section("Repair by rewriting the identity record", cfg.color)
@@ -501,7 +501,7 @@ async def action_repair_write(cfg: ToolConfig):
 
 
 async def action_restore(cfg: ToolConfig):
-    """Write a previously saved sector image back — the undo for any write repair."""
+    """Write a previously saved sector image back - the undo for any write repair."""
     section("Restore identity sector from a backup", cfg.color)
 
     path_text = input("Path to backup .bin: ").strip()

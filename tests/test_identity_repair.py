@@ -112,7 +112,7 @@ class TestBuildRepairedSector:
         # 1322 cube the 3 bytes in front of it are zero padding created when the
         # name record was shortened. Nothing after that padding may move: the AD
         # chain terminates before it, so firmware cannot be reaching it by walking
-        # records — it must be using the offset.
+        # records - it must be using the offset.
         cfg = cfg_1322()
         record = parse_identity_record(SECTOR_1322, A1_MODEL_1322, cfg)
         repaired = build_repaired_sector(SECTOR_1322, record, cfg.clean_name_bytes)

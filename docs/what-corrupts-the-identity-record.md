@@ -2,7 +2,7 @@
 
 This tool repairs a cube whose advertising identity record was overwritten with
 junk. This note is about **how cubes get into that state**, because the answer
-turns out to be a bug pattern that any MoYu client can have — including the app
+turns out to be a bug pattern that any MoYu client can have - including the app
 you use every day, and including this tool's own key-guessing fallback if you
 write one.
 
@@ -17,7 +17,7 @@ for a bad key.
 
 So when a client encrypts a command under the wrong MAC, the cube does not ignore
 it. The cube decrypts it with *its* key, gets 20 bytes of plausible-looking
-garbage, and **executes it as a command** — a random opcode carrying a random
+garbage, and **executes it as a command** - a random opcode carrying a random
 payload.
 
 Writing under an unverified key is not "a connection that will fail". It is
@@ -41,7 +41,7 @@ cube decrypts to       ad 05 e5 a7 01 8b 01 9e bc f7 …
 
 `0xAD` appears to be "set device name". The firmware stored
 `<payload>_<mac suffix>` in the identity sector and rewrote the AD length byte to
-match — `0x0b` = 1 type byte + 5 payload + 5 suffix. That is byte for byte the
+match - `0x0b` = 1 type byte + 5 payload + 5 suffix. That is byte for byte the
 record we then recovered from the cube's flash at `0x0007b000`:
 
 ```
@@ -52,7 +52,7 @@ Downstream: the cube no longer advertises a `WCU_MY32` prefix, so the official a
 cannot find it, every `namePrefix` filter misses it, and any client deriving the
 MAC from fixed offsets in the name rejects it outright.
 
-You can reproduce the whole thing offline with this repo's `crypto.py` — no cube
+You can reproduce the whole thing offline with this repo's `crypto.py` - no cube
 required.
 
 **It is deterministic.** AES with a fixed key and IV always produces the same
@@ -65,7 +65,7 @@ connect, and why the junk bytes were bit-for-bit equal both times.
 1. **Read the MAC from the advertisement.** The cube broadcasts it in
    manufacturer-specific data, reversed. On Python/bleak, Android and desktop
    native you get it free in the scan result. On Web Bluetooth you need
-   `watchAdvertisements()` before connecting — the cube stops advertising once
+   `watchAdvertisements()` before connecting - the cube stops advertising once
    connected, so the ordering matters.
 2. **Confirm the key on the read path before writing anything.** The cube streams
    `0xAB` gyro packets unprompted. Subscribe, wait for one, and check that it
@@ -77,12 +77,12 @@ connect, and why the junk bytes were bit-for-bit equal both times.
    random command. Prefer waiting for the cube to talk first.
 4. **Never ship a real MAC as a default.** "User never opened settings" should be
    an obvious no-op, not a live wrong key aimed at every cube it meets.
-5. **Treat a name/MAC mismatch as fatal, not advisory** — and check it even when
+5. **Treat a name/MAC mismatch as fatal, not advisory** - and check it even when
    the name looks wrong, since a corrupted cube is exactly when it matters most.
 
 ## Caveat
 
 `0xAD` is not in any protocol documentation we have. The "set name" reading is
-inferred from an exact fit — opcode, length byte, payload bytes and the resulting
-flash record all agree — not from reading firmware. The mechanism (wrong key →
+inferred from an exact fit - opcode, length byte, payload bytes and the resulting
+flash record all agree - not from reading firmware. The mechanism (wrong key →
 garbage command → flash write) is solid regardless of what `0xAD` is called.
