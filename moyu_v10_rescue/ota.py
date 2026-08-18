@@ -146,9 +146,9 @@ class FreqchipOTA:
     async def write_data(self, addr: int, data: bytes, timeout: float = 6.0):
         """OTA WRITE_DATA (0x05). Framing mirrors READ_DATA: u32 addr, u16 len, payload.
 
-        The upstream recovery reported this opcode timing out, so it is not on
-        any automatic path - callers must have proven it works on this cube
-        first (see the write capability test). NOR flash only clears bits on a
+        This opcode times out on some firmware, so it is not on any automatic
+        path - callers must have proven it works on this cube first (see the
+        write capability test). NOR flash only clears bits on a
         write, so the target must be erased or blank.
         """
         if not (0 < len(data) <= 0xFFFF):

@@ -276,9 +276,9 @@ async def action_full_scan(cfg: ToolConfig):
     """Read-only sweep of the whole flash, looking for a pristine model template.
 
     The default scan window is centred on user/config space, where the *live*
-    record is. A factory template can sit below that, in firmware territory -
-    on the 8DD8 cube one did, at 0x000513a5. Whether this cube has one is the
-    question that decides if erase-and-reboot has anything to regenerate from.
+    record is. On some cubes a pristine factory template also sits below that,
+    in firmware territory, and it is the most likely thing the firmware
+    regenerates an identity from after an erase.
     """
     section("Full-flash identity scan (read-only)", cfg.color)
     start, end = cfg.scan_start, cfg.scan_end if cfg.scan_end else cfg.flash_max
@@ -325,16 +325,16 @@ async def action_full_scan(cfg: ToolConfig):
 async def action_write_test(cfg: ToolConfig):
     """Prove whether OTA WRITE_DATA works, without touching anything live.
 
-    Upstream reported 0x05 timing out, and every repair that can be undone
+    0x05 times out on some firmware, and every repair that can be undone
     depends on it. NOR flash clears bits without an erase, so this writes into
     blank padding at the end of the identity sector and reads it back.
 
-    Two writes, not one. A 4-byte probe answers "does the opcode work at all";
-    a full `write_chunk`-sized probe answers "does it work at the size the
-    repair uses", and only the second question is the one that matters. The
-    repair writes the sector back in `write_chunk` blocks *after* erasing it,
-    so a size limit discovered there would strand the cube with a blank
-    identity sector - restoring the backup goes through the same writes.
+    It writes twice: 4 bytes to show the opcode works at all, then a full
+    `write_chunk`-sized block to show it works at the size the repair uses.
+    Only the second licenses the repair, which writes the sector back in
+    `write_chunk` blocks *after* erasing it. A size limit found only at that
+    point would leave the cube with a blank identity sector, since restoring
+    the backup goes through the same writes.
     """
     section("WRITE_DATA capability test", cfg.color)
     fd, client = await connect_target(cfg)

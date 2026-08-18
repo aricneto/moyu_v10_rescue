@@ -131,14 +131,11 @@ def build_repaired_sector(sector: bytes, record: IdentityRecord, clean_name: byt
     The repaired name is usually *longer* than the corrupt one, and the records
     after it - including the manufacturer-data block carrying the MAC the AES
     salt comes from - shift up to stay a contiguous chain. What must **not**
-    move is whatever follows the chain: on both cubes we have bytes for, an
-    unidentified structure sits at sector+0x020 regardless of how long the name
-    record is, and on the cube with the shortened name the gap in front of it is
-    zero-filled. That padding is where the growth is absorbed, so every absolute
-    offset past it is preserved.
-
-    Erasing a sector and writing this back is reversible (the pre-image is on
-    disk); erasing alone is not.
+    move is whatever follows the chain: an unidentified structure sits at
+    sector+0x020 regardless of how long the name record is, and where the name
+    record was shortened the gap in front of it is zero padding. That padding
+    is where the growth is absorbed, so every absolute offset past it is
+    preserved.
 
     Raises ValueError when the growth cannot be absorbed, rather than moving
     data whose position may be load-bearing.
@@ -262,10 +259,8 @@ async def identity_scan(
         print("Could not infer user/config start; using broad fallback scan.")
 
     # An explicit range overrides the inferred window. The default window is
-    # centred on user/config space, which is where a *live* record lives - but a
-    # pristine factory template can sit below it, in firmware territory, and
-    # whether one exists decides whether erase-and-reboot has anything to
-    # regenerate from.
+    # centred on user/config space, where the *live* record lives; a pristine
+    # factory template can sit below it, in firmware territory.
     if scan_range is not None:
         scan_start, scan_end = scan_range
         print(f"Range override: 0x{scan_start:08x}..0x{scan_end:08x}")
