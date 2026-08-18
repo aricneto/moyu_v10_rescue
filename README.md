@@ -144,35 +144,7 @@ backups/pre_erase_identity_sector_0x0007b000_20260101_120000.bin
 
 Backups are binary sector dumps. Keep them.
 
-### 5. Apply repair patch: erase live identity sector
-
-This is the destructive repair option.
-
-It only proceeds when it can find the exact current A1 model bytes inside a likely user/config sector. Before erase, it saves a backup. Then it requires an exact confirmation phrase like:
-
-```text
-ERASE 0007B000
-```
-
-After erase, it verifies the sector is all `0xFF`.
-
-This option does **not** automatically reboot. Run option 6 afterward.
-
-### 6. Reboot cube
-
-Sends the OTA reboot command. The cube may disconnect/reset without returning a clean notification; that can be normal.
-
-After reboot, the cube will light up for a few seconds, wait 10-20 seconds, wake the cube, then run option 2 again.
-
-Success looks like:
-
-```text
-model: 57 43 55 5f 4d 59 33 32 / 'WCU_MY32'
-```
-
-and apps such as WCU/Cubeast/csTimer should have a much better chance of recognizing the cube again.
-
-### 8. Full-flash identity scan (read-only)
+### 5. Full-flash identity scan (read-only)
 
 Options 3 and 4 scan a window around user/config space, which is where the *live*
 record is. This one sweeps the whole flash (`--scan-start` / `--scan-end` to narrow
@@ -186,13 +158,13 @@ same situation, and erase-only is a much larger bet there.
 The scan is slow - roughly one BLE round trip per `--read-chunk` bytes, so a full
 1 MB sweep is several minutes.
 
-### 9. WRITE_DATA capability test
+### 6. WRITE_DATA capability test
 
 Writes into blank padding at the end of the identity sector and reads it back.
 Nothing live is touched, and a backup is taken first.
 
 It writes twice: four bytes, then a full `--write-chunk`-sized block. The second
-write is the one that matters. Option 10 writes the sector back in `--write-chunk`
+write is the one that matters. Option 7 writes the sector back in `--write-chunk`
 blocks *after* erasing it, and restoring the backup goes through the same writes,
 so a size limit found only at that point would leave the cube with a blank
 identity sector and no way back. If the small write passes and the big one does
@@ -201,11 +173,11 @@ for the repair.
 
 `WRITE_DATA` (`0x05`) timed out during the original recovery, so it is not used on
 any automatic path. This is how you find out whether *this* cube accepts it, which
-decides whether option 10 is available.
+decides whether option 7 is available.
 
-### 10. Rewrite identity record (erase + write)
+### 7. Rewrite identity record (erase + write)
 
-The repair to prefer when option 9 passes. Reads the sector, locates the
+The repair to prefer when option 6 passes. Reads the sector, locates the
 advertising name record, rebuilds it with the correct model name - fixing the AD
 length byte and moving the manufacturer-data record up to keep the record chain
 contiguous - then erases the sector and writes the corrected image back.
@@ -223,14 +195,42 @@ It refuses unless the model bytes are found *inside a real AD name record*
 anything, so a bare pattern hit is not enough to justify rewriting.
 
 The important property is that it is **reversible**: the pre-image is saved first,
-and if the write fails the sector is simply left erased - the same state option 5
+and if the write fails the sector is simply left erased - the same state option 8
 produces, from which you can retry or restore.
 
-### 11. Restore identity sector from a backup
+### 8. Apply repair patch: erase live identity sector
+
+This is the destructive repair option.
+
+It only proceeds when it can find the exact current A1 model bytes inside a likely user/config sector. Before erase, it saves a backup. Then it requires an exact confirmation phrase like:
+
+```text
+ERASE 0007B000
+```
+
+After erase, it verifies the sector is all `0xFF`.
+
+This option does **not** automatically reboot. Run option 10 afterward.
+
+### 9. Restore identity sector from a backup
 
 Erases the sector and writes a saved `.bin` back over it. The target address comes
 from the backup's filename, not from configuration, so a restore cannot land on
 the wrong sector.
+
+### 10. Reboot cube
+
+Sends the OTA reboot command. The cube may disconnect/reset without returning a clean notification; that can be normal.
+
+After reboot, the cube will light up for a few seconds, wait 10-20 seconds, wake the cube, then run option 2 again.
+
+Success looks like:
+
+```text
+model: 57 43 55 5f 4d 59 33 32 / 'WCU_MY32'
+```
+
+and apps such as WCU/Cubeast/csTimer should have a much better chance of recognizing the cube again.
 
 ## One-shot command mode
 
@@ -244,8 +244,8 @@ py .\v10_rescue.py --command backup
 py .\v10_rescue.py --command fullscan
 py .\v10_rescue.py --command writetest
 py .\v10_rescue.py --command repair
-py .\v10_rescue.py --command restore
 py .\v10_rescue.py --command apply
+py .\v10_rescue.py --command restore
 py .\v10_rescue.py --command reboot
 ```
 
@@ -266,8 +266,8 @@ Then:
 
 | writetest | fullscan | Do this |
 |-----------|----------|---------|
-| passes    | either   | `repair` (option 10) - reversible, with the same `--write-chunk` the test passed at |
-| fails     | template found | `apply` (option 5), then `reboot` - the upstream path |
+| passes    | either   | `repair` (option 7) - reversible, with the same `--write-chunk` the test passed at |
+| fails     | template found | `apply` (option 8), then `reboot` - the upstream path |
 | fails     | no template    | Stop. Erasing may leave no identity to regenerate from, and the manufacturer data that seeds the AES salt lives in the same record. A cube with a corrupt *name* is still usable by software that does not filter on it; a cube with no identity record may not be. |
 
 Finish with `reboot`, then `test` again. Success is `A1` reporting `WCU_MY32`.
@@ -300,7 +300,7 @@ This tool's main repair path avoids `WRITE_DATA`. During the original recovery, 
 
 ### BLE scanner still shows the old garbled name after repair
 
-The OS or scanner may cache old names. Reboot the cube using option 6, toggle Bluetooth, remove/forget the device, scan from a second device, or run the protocol test. The reliable success check is `A1` showing `WCU_MY32`.
+The OS or scanner may cache old names. Reboot the cube using option 10, toggle Bluetooth, remove/forget the device, scan from a second device, or run the protocol test. The reliable success check is `A1` showing `WCU_MY32`.
 
 ### The corrupt model is shorter than 8 bytes
 

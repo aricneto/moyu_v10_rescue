@@ -262,7 +262,7 @@ async def action_apply(cfg: ToolConfig):
             verify = await ota.read_flash(sector, SECTOR_SIZE)
             if all(b == 0xFF for b in verify):
                 ok(f"Sector 0x{sector:08x} is erased/blank.", cfg.color)
-                warn("Now run option 6: Reboot cube. The BLE name may not change until reboot.", cfg.color)
+                warn("Now run option 10: Reboot cube. The BLE name may not change until reboot.", cfg.color)
             else:
                 fail("Erase verification failed; sector is not all 0xFF.", cfg.color)
                 summarize_sector(verify, sector, cfg, a1.model_bytes)
@@ -581,16 +581,16 @@ Read-only
   2) Test BLE/protocol/battery/moves
   3) Verify identity/model flash state
   4) Backup identity sector
-  8) Full-flash identity scan (is there a pristine template?)
-  9) WRITE_DATA capability test (writes into blank padding, small then full-size)
+  5) Full-flash identity scan (is there a pristine template?)
+  6) WRITE_DATA capability test (writes into blank padding, small then full-size)
 
 Repair
- 10) Rewrite identity record   (erase + write; reversible, needs 9 to pass)
-  5) Erase live identity sector (erase only; NOT reversible)
- 11) Restore identity sector from a backup file
-  6) Reboot cube
+  7) Rewrite identity record   (erase + write; reversible, needs 6 to pass)
+  8) Erase live identity sector (erase only; NOT reversible)
+  9) Restore identity sector from a backup file
+ 10) Reboot cube
 
-  7) Quit
+ 11) Quit
 """.strip()
 
 
@@ -610,19 +610,19 @@ async def interactive_menu(cfg: ToolConfig):
                 await action_verify(cfg)
             elif choice in {"4", "backup"}:
                 await action_backup(cfg)
-            elif choice in {"5", "apply", "patch"}:
-                await action_apply(cfg)
-            elif choice in {"6", "reboot"}:
-                await action_reboot(cfg)
-            elif choice in {"8", "fullscan"}:
+            elif choice in {"5", "fullscan"}:
                 await action_full_scan(cfg)
-            elif choice in {"9", "writetest"}:
+            elif choice in {"6", "writetest"}:
                 await action_write_test(cfg)
-            elif choice in {"10", "repair"}:
+            elif choice in {"7", "repair"}:
                 await action_repair_write(cfg)
-            elif choice in {"11", "restore"}:
+            elif choice in {"8", "apply", "patch"}:
+                await action_apply(cfg)
+            elif choice in {"9", "restore"}:
                 await action_restore(cfg)
-            elif choice in {"7", "q", "quit", "exit"}:
+            elif choice in {"10", "reboot"}:
+                await action_reboot(cfg)
+            elif choice in {"11", "q", "quit", "exit"}:
                 print("Bye.")
                 return
             else:

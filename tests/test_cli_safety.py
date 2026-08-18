@@ -337,8 +337,8 @@ def test_action_write_test_catches_a_full_size_write_that_is_truncated(monkeypat
 
 
 def test_write_test_probes_leave_the_repair_able_to_run(monkeypatch):
-    # The probes land in blank padding far past the record, so running option 9
-    # first cannot block option 10.
+    # The probes land in blank padding far past the record, so running option 6
+    # first cannot block option 7.
     cfg = ToolConfig(color=False, target_name_suffix="1322", assume_yes=True)
     ota = RWFakeOTA(sector_1322())
     install_common_apply_mocks(monkeypatch, A1_1322, ota, sector_choice=0x7B000, prompt=True)
