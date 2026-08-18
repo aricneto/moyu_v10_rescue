@@ -19,7 +19,11 @@ class ToolConfig:
     default_identity_sector: int = 0x0007B000
     user_region_margin_before: int = 0x8000
     user_region_scan_after: int = 0x30000
+    # Explicit range for the full-flash scan; scan_end 0 means "up to flash_max".
+    scan_start: int = 0x0
+    scan_end: int = 0x0
     read_chunk: int = 128
+    write_chunk: int = 128
     watch_seconds: float = 12.0
     color: bool = True
     assume_yes: bool = False

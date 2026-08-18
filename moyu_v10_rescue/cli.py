@@ -3,15 +3,26 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+from pathlib import Path
 
 from bleak import BleakClient
 
 from .config import ToolConfig, DEFAULT_TARGET_ADDRESS, DEFAULT_TARGET_SUFFIX, suffix_from_mac
 from .cube_ble import scan_for_target, print_device_summary
 from .cube_protocol import V10Protocol, SERVICE, NOTIFY, WRITE
-from .identity import backup_sector, choose_repair_sector, identity_scan, summarize_sector, SECTOR_SIZE
+from .identity import (
+    backup_sector,
+    build_repaired_sector,
+    choose_repair_sector,
+    flash_model_pattern,
+    identity_scan,
+    parse_identity_record,
+    sector_from_backup_name,
+    summarize_sector,
+    SECTOR_SIZE,
+)
 from .ota import FreqchipOTA, OTA_SERVICE
-from .util import banner, color_enabled, fail, hr, info, ok, prompt_exact, prompt_yes_no, section, warn
+from .util import banner, color_enabled, fail, hexdump, hr, info, ok, prompt_exact, prompt_yes_no, section, warn
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -26,9 +37,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--watch-seconds", type=float, default=12.0)
     p.add_argument("--no-color", action="store_true")
     p.add_argument("--yes", action="store_true", help="skip non-destructive confirmations; destructive erase still requires exact phrase")
+    p.add_argument("--scan-start", default="0x0", help="first address for the full-flash scan")
+    p.add_argument("--scan-end", default="0x0", help="last address for the full-flash scan; 0 means flash_max")
+    p.add_argument(
+        "--write-chunk",
+        type=int,
+        default=ToolConfig.write_chunk,
+        help="bytes per WRITE_DATA packet; lower it if the full-size write test fails",
+    )
     p.add_argument(
         "--command",
-        choices=["menu", "scan", "test", "verify", "backup", "apply", "reboot"],
+        choices=[
+            "menu", "scan", "test", "verify", "backup", "apply", "reboot",
+            "fullscan", "writetest", "repair", "restore",
+        ],
         default="menu",
         help="run one command instead of the interactive menu",
     )
@@ -48,6 +70,9 @@ def cfg_from_args(args) -> ToolConfig:
         watch_seconds=args.watch_seconds,
         color=color_enabled(not args.no_color),
         assume_yes=args.yes,
+        scan_start=int(str(args.scan_start), 0),
+        scan_end=int(str(args.scan_end), 0),
+        write_chunk=args.write_chunk,
     )
 
 
@@ -218,8 +243,8 @@ async def action_apply(cfg: ToolConfig):
                 warn("This sector is already blank. Do not erase again; run the reboot option.", cfg.color)
                 return
 
-            if current.find(a1.model_bytes) == -1:
-                fail("Refusing to erase: sector no longer contains the exact A1 model bytes.", cfg.color)
+            if current.find(flash_model_pattern(a1.model_bytes)) == -1:
+                fail("Refusing to erase: sector no longer contains the current A1 model bytes.", cfg.color)
                 return
 
             backup_path = await backup_sector(ota, sector, cfg, label="pre_erase_identity")
@@ -237,10 +262,290 @@ async def action_apply(cfg: ToolConfig):
             verify = await ota.read_flash(sector, SECTOR_SIZE)
             if all(b == 0xFF for b in verify):
                 ok(f"Sector 0x{sector:08x} is erased/blank.", cfg.color)
-                warn("Now run option 6: Reboot cube. The BLE name may not change until reboot.", cfg.color)
+                warn("Now run option 10: Reboot cube. The BLE name may not change until reboot.", cfg.color)
             else:
                 fail("Erase verification failed; sector is not all 0xFF.", cfg.color)
                 summarize_sector(verify, sector, cfg, a1.model_bytes)
+        finally:
+            await ota.stop()
+    finally:
+        await client.disconnect()
+
+
+async def action_full_scan(cfg: ToolConfig):
+    """Read-only sweep of the whole flash, looking for a pristine model template.
+
+    The default scan window is centred on user/config space, where the *live*
+    record is. On some cubes a pristine factory template also sits below that,
+    in firmware territory, and it is the most likely thing the firmware
+    regenerates an identity from after an erase.
+    """
+    section("Full-flash identity scan (read-only)", cfg.color)
+    start, end = cfg.scan_start, cfg.scan_end if cfg.scan_end else cfg.flash_max
+    info(
+        f"Scanning 0x{start:08x}..0x{end:08x} in {cfg.read_chunk}-byte reads. "
+        f"That is ~{max(1, (end - start) // cfg.read_chunk)} round trips; expect several minutes.",
+        cfg.color,
+    )
+
+    fd, client = await connect_target(cfg)
+    try:
+        a1, ota = await _get_a1_and_ota(cfg, client, fd.adv)
+        try:
+            scan = await identity_scan(ota, cfg, a1.model_bytes, scan_range=(start, end))
+
+            print("\nSummary:")
+            if not scan.findings:
+                print("  Nothing found anywhere in the scanned range.")
+            for f in scan.findings:
+                print(f"  {f.label:16s}  0x{f.address:08x}  {f.pattern.hex(' ')}")
+
+            templates = [f for f in scan.findings if f.label in {"good_model", "clean_name"}]
+            live = [f for f in scan.findings if f.label == "a1_model_bytes"]
+
+            print()
+            if templates:
+                ok(f"A pristine model template exists ({len(templates)} match(es)).", cfg.color)
+                info("Erase-and-reboot has a plausible source to regenerate from.", cfg.color)
+            else:
+                warn("No pristine 'WCU_MY32' bytes anywhere in the scanned range.", cfg.color)
+                warn(
+                    "The cube that recovered by erase+reboot had one. Without it, erasing "
+                    "risks leaving no identity at all - prefer the write repair.",
+                    cfg.color,
+                )
+            if live:
+                info(f"Live corrupt record located in sector 0x{live[0].sector:08x}.", cfg.color)
+        finally:
+            await ota.stop()
+    finally:
+        await client.disconnect()
+
+
+async def action_write_test(cfg: ToolConfig):
+    """Prove whether OTA WRITE_DATA works, without touching anything live.
+
+    0x05 times out on some firmware, and every repair that can be undone
+    depends on it. NOR flash clears bits without an erase, so this writes into
+    blank padding at the end of the identity sector and reads it back.
+
+    It writes twice: 4 bytes to show the opcode works at all, then a full
+    `write_chunk`-sized block to show it works at the size the repair uses.
+    Only the second licenses the repair, which writes the sector back in
+    `write_chunk` blocks *after* erasing it. A size limit found only at that
+    point would leave the cube with a blank identity sector, since restoring
+    the backup goes through the same writes.
+    """
+    section("WRITE_DATA capability test", cfg.color)
+    fd, client = await connect_target(cfg)
+    try:
+        a1, ota = await _get_a1_and_ota(cfg, client, fd.adv)
+        try:
+            sector = cfg.default_identity_sector
+            chunk_addr = sector + SECTOR_SIZE - cfg.write_chunk
+            small_addr = chunk_addr - 8
+            probe_len = 8 + cfg.write_chunk
+
+            current = await ota.read_flash(small_addr, probe_len)
+            print(f"Probe area 0x{small_addr:08x}..0x{small_addr + probe_len:08x}")
+            if any(b != 0xFF for b in current):
+                print(current.hex(' '))
+                fail("Probe area is not blank; refusing to write over existing bytes.", cfg.color)
+                return
+            print("  blank, as expected")
+
+            await backup_sector(ota, sector, cfg, label="pre_write_test")
+            warn(
+                f"This writes 4 bytes, then {cfg.write_chunk} bytes, into unused padding at the "
+                "end of the identity sector. It does not touch the identity record, and a later "
+                "repair erases the sector anyway.",
+                cfg.color,
+            )
+            if not cfg.assume_yes and not prompt_yes_no("Run the write test?", default=False):
+                warn("Skipped.", cfg.color)
+                return
+
+            probe = bytes.fromhex("a5 5a a5 5a")
+            try:
+                raw = await ota.write_data(small_addr, probe)
+                print(f"WRITE_DATA response: {raw.hex(' ')}")
+            except TimeoutError as e:
+                fail(f"WRITE_DATA timed out: {e}", cfg.color)
+                warn("This firmware does not accept writes. Only the erase-only path remains.", cfg.color)
+                return
+            except Exception as e:
+                fail(f"WRITE_DATA rejected: {e!r}", cfg.color)
+                return
+
+            readback = await ota.read_flash(small_addr, 4)
+            print(f"Readback:            {readback.hex(' ')}")
+            if readback != probe:
+                if all(b == 0xFF for b in readback):
+                    fail("Write was accepted but nothing changed - the command is a no-op here.", cfg.color)
+                else:
+                    fail("Readback does not match what was written; do not use the write repair.", cfg.color)
+                return
+            ok("WRITE_DATA works for a 4-byte payload.", cfg.color)
+
+            # The full-size packet is 9 + write_chunk bytes and has to survive the
+            # negotiated ATT MTU, which the 4-byte probe never exercised. A counting
+            # pattern makes a truncated write show up as the offset it stopped at.
+            block = (bytes(range(256)) * (cfg.write_chunk // 256 + 1))[:cfg.write_chunk]
+            smaller = max(4, cfg.write_chunk // 4)
+            info(f"Writing a full {cfg.write_chunk}-byte block at 0x{chunk_addr:08x}...", cfg.color)
+            try:
+                await ota.write_data(chunk_addr, block)
+            except Exception as e:
+                fail(f"Full-size WRITE_DATA failed: {e!r}", cfg.color)
+                warn(f"Retry this test with --write-chunk {smaller} before using the write repair.", cfg.color)
+                return
+
+            readback = await ota.read_flash(chunk_addr, cfg.write_chunk)
+            if readback == block:
+                ok(f"WRITE_DATA works at {cfg.write_chunk} bytes. The reversible write repair is available.", cfg.color)
+            else:
+                landed = next(
+                    (i for i, (a, b) in enumerate(zip(readback, block)) if a != b),
+                    min(len(readback), len(block)),
+                )
+                fail(f"Only the first {landed} bytes read back correctly.", cfg.color)
+                warn(f"Retry this test with --write-chunk {smaller} before using the write repair.", cfg.color)
+        finally:
+            await ota.stop()
+    finally:
+        await client.disconnect()
+
+
+async def action_repair_write(cfg: ToolConfig):
+    """Erase the identity sector and write back a corrected image.
+
+    Reversible: the pre-image is saved first, and a failed write leaves the
+    sector erased - the same state the erase-only repair produces, from which
+    this can simply be retried or the backup restored.
+    """
+    section("Repair by rewriting the identity record", cfg.color)
+    warn("Requires WRITE_DATA to work on this cube. Run the write test first.", cfg.color)
+
+    fd, client = await connect_target(cfg)
+    try:
+        a1, ota = await _get_a1_and_ota(cfg, client, fd.adv)
+        try:
+            if a1.model_bytes == cfg.good_model:
+                ok("A1 already reports the clean model. No repair needed.", cfg.color)
+                return
+
+            scan = await identity_scan(ota, cfg, a1.model_bytes)
+            sector = choose_repair_sector(scan, a1.model_bytes, cfg)
+            if sector is None:
+                fail("Could not locate the live record in user/config flash; refusing to write.", cfg.color)
+                return
+
+            current = await ota.read_flash(sector, SECTOR_SIZE)
+            summarize_sector(current, sector, cfg, a1.model_bytes)
+
+            record = parse_identity_record(current, a1.model_bytes, cfg)
+            if record is None:
+                fail("Found the model bytes but they are not inside an advertising name record.", cfg.color)
+                warn("Refusing to rewrite a record whose structure is not understood.", cfg.color)
+                return
+
+            clean_name = cfg.clean_name_bytes
+            print(f"\nCurrent name: {record.name.hex(' ')}  {record.name!r}")
+            print(f"Repaired name: {clean_name.hex(' ')}  {clean_name!r}")
+            try:
+                repaired = build_repaired_sector(current, record, clean_name)
+            except ValueError as e:
+                fail(f"Refusing to rewrite: {e}", cfg.color)
+                return
+
+            print("\nBefore (first 64 bytes):")
+            hexdump(current[:64], sector)
+            print("After (first 64 bytes):")
+            hexdump(repaired[:64], sector)
+
+            backup_path = await backup_sector(ota, sector, cfg, label="pre_write_identity")
+            warn(f"Backup saved: {backup_path}", cfg.color)
+            warn("The next operation erases one 4 KB sector and writes the image above.", cfg.color)
+            expected = f"WRITE {sector:08X}"
+            if not prompt_exact(
+                f"This erases sector 0x{sector:08x} and writes back a corrected identity record. "
+                f"If the write fails, the sector stays erased and this backup can be restored.",
+                expected,
+            ):
+                warn("Confirmation did not match; aborting.", cfg.color)
+                return
+
+            await ota.page_erase(sector)
+            blank = await ota.read_flash(sector, SECTOR_SIZE)
+            if not all(b == 0xFF for b in blank):
+                fail("Erase verification failed; not writing on top of a dirty sector.", cfg.color)
+                return
+
+            # Erased flash already reads 0xFF, so only the meaningful head needs writing.
+            payload = repaired.rstrip(b"\xFF")
+            info(f"Writing {len(payload)} bytes at 0x{sector:08x}...", cfg.color)
+            await ota.write_flash(sector, payload)
+
+            verify = await ota.read_flash(sector, SECTOR_SIZE)
+            if verify == repaired:
+                ok("Sector rewritten and verified.", cfg.color)
+                warn("Now run the reboot option, then re-scan. A1 should report WCU_MY32.", cfg.color)
+            else:
+                fail("Readback does not match the intended image.", cfg.color)
+                summarize_sector(verify, sector, cfg, a1.model_bytes)
+                warn(f"Restore from {backup_path} or retry before rebooting.", cfg.color)
+        finally:
+            await ota.stop()
+    finally:
+        await client.disconnect()
+
+
+async def action_restore(cfg: ToolConfig):
+    """Write a previously saved sector image back - the undo for any write repair."""
+    section("Restore identity sector from a backup", cfg.color)
+
+    path_text = input("Path to backup .bin: ").strip()
+    path = Path(path_text)
+    if not path.is_file():
+        fail(f"No such file: {path}", cfg.color)
+        return
+
+    data = path.read_bytes()
+    if len(data) != SECTOR_SIZE:
+        fail(f"Backup is {len(data)} bytes; expected exactly {SECTOR_SIZE}.", cfg.color)
+        return
+
+    sector = sector_from_backup_name(path.name)
+    if sector is None:
+        fail("Could not read a sector address out of the filename; aborting.", cfg.color)
+        return
+    info(f"Restoring to sector 0x{sector:08x}", cfg.color)
+
+    fd, client = await connect_target(cfg)
+    try:
+        ota = FreqchipOTA(client, cfg)
+        await ota.start()
+        try:
+            expected = f"RESTORE {sector:08X}"
+            if not prompt_exact(
+                f"This erases sector 0x{sector:08x} and writes back {path.name}.",
+                expected,
+            ):
+                warn("Confirmation did not match; aborting.", cfg.color)
+                return
+
+            await ota.page_erase(sector)
+            blank = await ota.read_flash(sector, SECTOR_SIZE)
+            if not all(b == 0xFF for b in blank):
+                fail("Erase verification failed; not writing on top of a dirty sector.", cfg.color)
+                return
+
+            await ota.write_flash(sector, data.rstrip(b"\xFF"))
+            verify = await ota.read_flash(sector, SECTOR_SIZE)
+            if verify == data:
+                ok("Sector restored and verified.", cfg.color)
+            else:
+                fail("Readback does not match the backup.", cfg.color)
         finally:
             await ota.stop()
     finally:
@@ -271,13 +576,21 @@ Target address: {cfg.target_address}
 Target suffix:  {cfg.target_name_suffix}
 Manual MAC:     {cfg.manual_mac}
 
-1) Scan for cube
-2) Test BLE/protocol/battery/moves
-3) Verify identity/model flash state
-4) Backup identity sector
-5) Apply repair patch: erase live identity sector
-6) Reboot cube
-7) Quit
+Read-only
+  1) Scan for cube
+  2) Test BLE/protocol/battery/moves
+  3) Verify identity/model flash state
+  4) Backup identity sector
+  5) Full-flash identity scan (is there a pristine template?)
+  6) WRITE_DATA capability test (writes into blank padding, small then full-size)
+
+Repair
+  7) Rewrite identity record   (erase + write; reversible, needs 6 to pass)
+  8) Erase live identity sector (erase only; NOT reversible)
+  9) Restore identity sector from a backup file
+ 10) Reboot cube
+
+ 11) Quit
 """.strip()
 
 
@@ -297,11 +610,19 @@ async def interactive_menu(cfg: ToolConfig):
                 await action_verify(cfg)
             elif choice in {"4", "backup"}:
                 await action_backup(cfg)
-            elif choice in {"5", "apply", "patch"}:
+            elif choice in {"5", "fullscan"}:
+                await action_full_scan(cfg)
+            elif choice in {"6", "writetest"}:
+                await action_write_test(cfg)
+            elif choice in {"7", "repair"}:
+                await action_repair_write(cfg)
+            elif choice in {"8", "apply", "patch"}:
                 await action_apply(cfg)
-            elif choice in {"6", "reboot"}:
+            elif choice in {"9", "restore"}:
+                await action_restore(cfg)
+            elif choice in {"10", "reboot"}:
                 await action_reboot(cfg)
-            elif choice in {"7", "q", "quit", "exit"}:
+            elif choice in {"11", "q", "quit", "exit"}:
                 print("Bye.")
                 return
             else:
@@ -341,6 +662,14 @@ async def main_async(argv=None):
         await action_apply(cfg)
     elif command == "reboot":
         await action_reboot(cfg)
+    elif command == "fullscan":
+        await action_full_scan(cfg)
+    elif command == "writetest":
+        await action_write_test(cfg)
+    elif command == "repair":
+        await action_repair_write(cfg)
+    elif command == "restore":
+        await action_restore(cfg)
 
 
 def main(argv=None):
